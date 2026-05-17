@@ -1,0 +1,83 @@
+name: Build ImmortalWrt
+
+on:
+  schedule:
+    - cron: '0 15 */3 * *' # 每 3 天的 UTC 15:00 (北京时间凌晨 00:00) 自动触发编译
+  workflow_dispatch:      # 允许你在 GitHub 页面上手动点击 "Run workflow" 随时触发
+
+env:
+  REPO_URL: https://github.com/immortalwrt/immortalwrt
+  REPO_BRANCH: master
+  CONFIG_FILE: tendabe12pro.config
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Free Disk Space (GitHub 虚拟机瘦身)
+      run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/share/swift /etc/amdrpc
+        sudo docker image prune -a -f
+        df -h
+
+    - name: Install Compilation Dependencies
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext gcc-multilib g++-multilib git gnutls-dev gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp nano ninja-build psmisc qemu-utils rsync scons squashfs-tools subversion swig texinfo u-boot-tools upx-ucl unzip vim wget xmlto xz-utils zlib1g-dev
+        sudo apt-get clean
+        sudo timedatectl set-timezone "Asia/Shanghai"
+
+    - name: Clone ImmortalWrt Source
+      run: |
+        git clone --depth 1 -b $REPO_BRANCH $REPO_URL openwrt
+        echo "WORK_DIR=$GITHUB_WORKSPACE/openwrt" >> $GITHUB_ENV
+
+    - name: Update & Install Feeds
+      run: |
+        cd $WORK_DIR
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: Load Custom Configuration
+      run: |
+        [ -e $CONFIG_FILE ] && cp $CONFIG_FILE $WORK_DIR/.config
+        cd $WORK_DIR
+        # 核心步骤：用 defconfig 补充新源码中缺失的默认配置，保证编译不因配置残缺而卡死
+        make defconfig
+
+    - name: Download Packages
+      run: |
+        cd $WORK_DIR
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: Compile Firmware
+      id: compile
+      run: |
+        cd $WORK_DIR
+        echo "$(nproc) thread compile"
+        # 默认使用最大线程编译，如果失败则自动切换单线程输出详细日志
+        make -j$(nproc) || make -j1 V=s
+        echo "status=success" >> $GITHUB_OUTPUT
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+
+    - name: Organize Artifacts
+      if: steps.compile.outputs.status == 'success' && !cancelled()
+      run: |
+        cd $WORK_DIR/bin/targets/*/*
+        rm -rf packages # 移除散装的 ipk 文件夹，只保留固件本体
+        echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
+
+    - name: Upload Firmware to Artifacts
+      uses: actions/upload-artifact@v4
+      if: steps.compile.outputs.status == 'success' && !cancelled()
+      with:
+        name: ImmortalWrt_Firmware_${{ env.FILE_DATE }}
+        path: ${{ env.FIRMWARE_PATH }}
