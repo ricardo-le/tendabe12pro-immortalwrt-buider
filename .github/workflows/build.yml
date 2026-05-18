@@ -10,6 +10,10 @@ env:
   REPO_BRANCH: master
   CONFIG_FILE: tendabe12pro.config
 
+# 【新增】必须赋予 Action 写入权限，否则无法自动创建 Release
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-22.04
@@ -66,18 +70,33 @@ jobs:
         # 默认使用最大线程编译，如果失败则自动切换单线程输出详细日志
         make -j$(nproc) || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
-        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+        
+        # 【修改】获取当前源码的 commit hash (前 7 位)
+        COMMIT_HASH=$(git rev-parse --short HEAD)
+        
+        # 【修改】生成 Release Tag：时间_分支哈希 (例如 202605172030_1a2b3c4)
+        RELEASE_TAG="$(date +"%Y%m%d%H%M")_${COMMIT_HASH}"
+        echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_ENV
 
     - name: Organize Artifacts
       if: steps.compile.outputs.status == 'success' && !cancelled()
       run: |
         cd $WORK_DIR/bin/targets/*/*
-        rm -rf packages # 移除散装的 ipk 文件夹，只保留固件本体
-        echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
+        # 【修改】创建一个临时目录存放要上传的指定 bin 文件
+        mkdir -p $GITHUB_WORKSPACE/release_firmware
+        # 找到指定的 sysupgrade.bin 文件并复制到临时目录
+        find . -name "immortalwrt-mediatek-filogic-tenda_be12-pro-squashfs-sysupgrade.bin" -exec cp {} $GITHUB_WORKSPACE/release_firmware/ \;
 
-    - name: Upload Firmware to Artifacts
-      uses: actions/upload-artifact@v4
+    - name: Upload Firmware to Release
+      uses: softprops/action-gh-release@v2
       if: steps.compile.outputs.status == 'success' && !cancelled()
       with:
-        name: ImmortalWrt_Firmware_${{ env.FILE_DATE }}
-        path: ${{ env.FIRMWARE_PATH }}
+        tag_name: ${{ env.RELEASE_TAG }}
+        # Release 标题
+        name: ImmortalWrt BE12 Pro - ${{ env.RELEASE_TAG }}
+        # 指定上传的文件路径
+        files: release_firmware/immortalwrt-mediatek-filogic-tenda_be12-pro-squashfs-sysupgrade.bin
+        body: |
+          自动编译的 Tenda BE12 Pro 固件。
+          分支: `${{ env.REPO_BRANCH }}`
+          源码版本: `${{ env.RELEASE_TAG }}`
